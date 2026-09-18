@@ -1,0 +1,1204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Lookora — AI Hairstyle Studio</title>
+<link rel="icon" href="data:," />
+
+<!-- React -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin></script>
+<!-- In-browser JSX transform -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.28.4/babel.min.js" crossorigin></script>
+
+<style>
+  html, body { margin: 0; padding: 0; }
+  #root { min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+
+const { useState, useRef, useEffect, useCallback } = React;
+
+/* ---------------------------------------------------------
+   LOOKORA — AI Hairstyle Studio (standalone build)
+   Real Gemini vision analysis + real Gemini image editing,
+   called directly from the browser with a single user-supplied key.
+--------------------------------------------------------- */
+
+/* ---------------- tiny local storage shim (browser localStorage wrapper) ---------------- */
+/* NOTE: this stores data in each visitor's own browser (localStorage).
+   "shared" data is NOT actually shared between different visitors/devices —
+   there's no server here. See the note at the bottom of this file if you
+   want ratings to be visible across everyone who visits the page. */
+const LocalStorageShim = {
+  _ns(key, shared) { return (shared ? "lk-shared:" : "lk-local:") + key; },
+  async get(key, shared) {
+    const raw = window.localStorage.getItem(this._ns(key, shared));
+    if (raw === null) throw new Error("not found");
+    return { key, value: raw, shared: !!shared };
+  },
+  async set(key, value, shared) {
+    window.localStorage.setItem(this._ns(key, shared), value);
+    return { key, value, shared: !!shared };
+  },
+  async delete(key, shared) {
+    window.localStorage.removeItem(this._ns(key, shared));
+    return { key, deleted: true, shared: !!shared };
+  },
+  async list(prefix, shared) {
+    const p = this._ns(prefix || "", shared);
+    const keys = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (k && k.startsWith(p)) keys.push(k.slice((shared ? "lk-shared:" : "lk-local:").length));
+    }
+    return { keys, prefix, shared: !!shared };
+  },
+};
+window.storage = LocalStorageShim;
+
+/* ---------------- minimal inline icon set (replaces lucide-react) ---------------- */
+function Icon({ children, size = 24, strokeWidth = 2, className = "" }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" className={className}>
+      {children}
+    </svg>
+  );
+}
+const Camera = (p) => <Icon {...p}><path d="M4 8h3l1.5-2h7L17 8h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13.5" r="3.5"/></Icon>;
+const Upload = (p) => <Icon {...p}><path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></Icon>;
+const Sparkles = (p) => <Icon {...p}><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></Icon>;
+const ChevronRight = (p) => <Icon {...p}><path d="M9 18l6-6-6-6"/></Icon>;
+const Star = (p) => <Icon {...p}><path d="M12 2l3 6.5 7 .9-5 4.9 1.2 7-6.2-3.3-6.2 3.3 1.2-7-5-4.9 7-.9z"/></Icon>;
+const SettingsIcon = (p) => <Icon {...p}><circle cx="12" cy="12" r="3"/><path d="M19.4 13a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6V19a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H5a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H11a1.7 1.7 0 0 0 1-1.6V5a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V11a1.7 1.7 0 0 0 1.6 1H19a2 2 0 1 1 0 4z"/></Icon>;
+const X = (p) => <Icon {...p}><path d="M18 6L6 18"/><path d="M6 6l12 12"/></Icon>;
+const Check = (p) => <Icon {...p}><path d="M20 6L9 17l-5-5"/></Icon>;
+const RotateCcw = (p) => <Icon {...p}><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></Icon>;
+const Loader2 = (p) => <Icon {...p}><path d="M12 3a9 9 0 1 0 9 9"/></Icon>;
+const ScanFace = (p) => <Icon {...p}><path d="M4 8V6a2 2 0 0 1 2-2h2"/><path d="M4 16v2a2 2 0 0 0 2 2h2"/><path d="M20 8V6a2 2 0 0 0-2-2h-2"/><path d="M20 16v2a2 2 0 0 1-2 2h-2"/><path d="M9 10v1"/><path d="M15 10v1"/><path d="M9 15c1 1 5 1 6 0"/></Icon>;
+const Wand2 = (p) => <Icon {...p}><path d="M4 20L18 6"/><path d="M14 2l1 2 2 1-2 1-1 2-1-2-2-1 2-1z"/><path d="M6 14l.7 1.3L8 16l-1.3.7L6 18l-.7-1.3L4 16l1.3-.7z"/></Icon>;
+const Home = (p) => <Icon {...p}><path d="M3 11l9-7 9 7"/><path d="M5 10v9a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1v-9"/></Icon>;
+const ThumbsUp = (p) => <Icon {...p}><path d="M7 22V11l4-8a2 2 0 0 1 2 2v5h5.3a2 2 0 0 1 2 2.4l-1.4 7A2 2 0 0 1 17 21H9a2 2 0 0 1-2-1z"/></Icon>;
+const AlertCircle = (p) => <Icon {...p}><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><path d="M12 16h.01"/></Icon>;
+const User = (p) => <Icon {...p}><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4.5 5-6 8-6s6.5 1.5 8 6"/></Icon>;
+const Users = (p) => <Icon {...p}><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c1.3-3.8 4-5 6.5-5s5.2 1.2 6.5 5"/><circle cx="17" cy="8" r="3"/><path d="M15 3.3a3 3 0 0 1 0 5.4"/><path d="M19 20c-.5-2.3-1.6-3.8-3-4.6"/></Icon>;
+
+/* ---------------- data + helpers ---------------- */
+
+const MEN_CATALOG = [
+  "Textured Crop", "Skin Fade", "Slick Back", "Pompadour", "Buzz Cut",
+  "Crew Cut", "Undercut", "Quiff", "Curly Top Fade"
+];
+const WOMEN_CATALOG = [
+  "Classic Bob", "Long Layers", "Pixie Cut", "Curtain Bangs", "Shag Cut",
+  "Beach Waves", "Sleek Ponytail", "Soft Curls", "Blunt Lob"
+];
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      const base64 = result.split(",")[1];
+      resolve({ base64, mimeType: file.type || "image/jpeg", dataUrl: result });
+    };
+    reader.onerror = () => reject(new Error("Could not read file."));
+    reader.readAsDataURL(file);
+  });
+}
+
+function extractText(data) {
+  return (data.content || [])
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join("\n");
+}
+
+function parseJsonLoose(text) {
+  const cleaned = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start === -1 || end === -1) throw new Error("No JSON found in response.");
+  return JSON.parse(cleaned.slice(start, end + 1));
+}
+
+async function callGeminiAnalyze(base64, mimeType, promptText, apiKey) {
+  if (!apiKey) throw new Error("Add a Gemini API key in Settings to run face analysis.");
+  const url =
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" +
+    encodeURIComponent(apiKey);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [
+        {
+          parts: [
+            { inlineData: { mimeType, data: base64 } },
+            { text: promptText },
+          ],
+        },
+      ],
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    const msg = (data && data.error && data.error.message) || ("Face analysis request failed (" + response.status + ").");
+    throw new Error(msg);
+  }
+  const parts = (((data.candidates || [])[0] || {}).content || {}).parts || [];
+  const text = parts.map((p) => p.text || "").join("\n").trim();
+  if (!text) throw new Error("Empty response from analysis model.");
+  return text;
+}
+
+async function callGeminiEdit(base64, mimeType, stylePrompt, apiKey) {
+  if (!apiKey) throw new Error("Add a Gemini API key in Settings to generate photo previews.");
+  const url =
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=" +
+    encodeURIComponent(apiKey);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [
+        {
+          parts: [
+            { inlineData: { mimeType, data: base64 } },
+            { text: stylePrompt },
+          ],
+        },
+      ],
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    const msg = (data && data.error && data.error.message) || ("Gemini request failed (" + response.status + ").");
+    throw new Error(msg);
+  }
+  const parts = (((data.candidates || [])[0] || {}).content || {}).parts || [];
+  const imgPart = parts.find((p) => p.inlineData && p.inlineData.data);
+  if (!imgPart) throw new Error("Gemini did not return an image for this style.");
+  const outMime = imgPart.inlineData.mimeType || "image/png";
+  return "data:" + outMime + ";base64," + imgPart.inlineData.data;
+}
+
+/* ---------------- UI atoms ---------------- */
+
+function TopBar({ onHome, onSettings, onRatings, active }) {
+  return (
+    <div className="lk-topbar">
+      <button className="lk-wordmark" onClick={onHome} aria-label="Lookora home">
+        <span className="lk-mark">L</span>
+        <span className="lk-word">OOKORA</span>
+      </button>
+      <div className="lk-topnav">
+        <button
+          className={"lk-navbtn" + (active === "ratings" ? " is-active" : "")}
+          onClick={onRatings}
+        >
+          <Star size={15} strokeWidth={2} />
+          <span>Ratings</span>
+        </button>
+        <button
+          className={"lk-navbtn" + (active === "settings" ? " is-active" : "")}
+          onClick={onSettings}
+        >
+          <SettingsIcon size={15} strokeWidth={2} />
+          <span>Settings</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Stepper({ step }) {
+  const steps = ["Identity", "Capture", "Reveal"];
+  const idx = { gender: 0, capture: 1, analyzing: 1, hub: 2, thanks: 2 }[step] ?? 0;
+  return (
+    <div className="lk-stepper" aria-hidden="true">
+      {steps.map((s, i) => (
+        <div className="lk-step" key={s}>
+          <span className={"lk-step-num" + (i <= idx ? " is-done" : "")}>{String(i + 1).padStart(2, "0")}</span>
+          <span className={"lk-step-label" + (i === idx ? " is-active" : "")}>{s}</span>
+          {i < steps.length - 1 && <span className="lk-step-rule" />}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ---------------- Screens ---------------- */
+
+function Landing({ onBegin }) {
+  return (
+    <div className="lk-landing">
+      <div className="lk-landing-copy">
+        <span className="lk-eyebrow">AI Hair Studio · Perceive → Think → Act</span>
+        <h1 className="lk-h1">
+          Your face.
+          <br />
+          <em>Reimagined.</em>
+        </h1>
+        <p className="lk-sub">
+          Scan the salon code, show us your face, and our AI reads its shape to curate nine
+          hairstyles built for you — then generates a real preview before a single cut is made.
+        </p>
+        <button className="lk-btn lk-btn-primary lk-btn-lg" onClick={onBegin}>
+          Begin <ChevronRight size={18} />
+        </button>
+      </div>
+      <div className="lk-landing-visual" aria-hidden="true">
+        <div className="lk-scan-frame">
+          <ScanFace size={64} strokeWidth={1} />
+          <div className="lk-scan-line" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function GenderSelect({ onPick }) {
+  return (
+    <div className="lk-card lk-center">
+      <Stepper step="gender" />
+      <h2 className="lk-h2">Who are we styling today?</h2>
+      <p className="lk-p">This tells our AI which catalogue of cuts to draw from.</p>
+      <div className="lk-choice-row">
+        <button className="lk-choice" onClick={() => onPick("men")}>
+          <User size={28} strokeWidth={1.4} />
+          <span>Men</span>
+        </button>
+        <button className="lk-choice" onClick={() => onPick("women")}>
+          <Users size={28} strokeWidth={1.4} />
+          <span>Women</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Capture({ gender, onBack, onAnalyze }) {
+  const [mode, setMode] = useState("upload");
+  const [image, setImage] = useState(null); // {base64, mimeType, dataUrl}
+  const [error, setError] = useState("");
+  const [streamOn, setStreamOn] = useState(false);
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    return () => stopCamera();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function startCamera() {
+    setError("");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+      setStreamOn(true);
+    } catch (e) {
+      setError("Couldn't access your camera. Check permissions, or upload a photo instead.");
+    }
+  }
+
+  function stopCamera() {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    setStreamOn(false);
+  }
+
+  function snapPhoto() {
+    const video = videoRef.current;
+    if (!video) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+    const ctx = canvas.getContext("2d");
+    ctx.translate(canvas.width, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+    const base64 = dataUrl.split(",")[1];
+    setImage({ base64, mimeType: "image/jpeg", dataUrl });
+    stopCamera();
+  }
+
+  async function handleFile(e) {
+    setError("");
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setError("Please choose an image file (JPG, PNG, or WEBP).");
+      return;
+    }
+    try {
+      const result = await fileToBase64(file);
+      setImage(result);
+    } catch (e2) {
+      setError("Couldn't read that file. Try another photo.");
+    }
+  }
+
+  return (
+    <div className="lk-card">
+      <Stepper step="capture" />
+      <h2 className="lk-h2">Show us your face</h2>
+      <p className="lk-p">Good, even lighting works best. Face the camera directly.</p>
+
+      <div className="lk-tabs">
+        <button
+          className={"lk-tab" + (mode === "upload" ? " is-active" : "")}
+          onClick={() => { setMode("upload"); stopCamera(); }}
+        >
+          <Upload size={15} /> Upload
+        </button>
+        <button
+          className={"lk-tab" + (mode === "camera" ? " is-active" : "")}
+          onClick={() => { setMode("camera"); setImage(null); }}
+        >
+          <Camera size={15} /> Camera
+        </button>
+      </div>
+
+      <div className="lk-capture-stage">
+        {mode === "upload" && !image && (
+          <button className="lk-dropzone" onClick={() => fileInputRef.current && fileInputRef.current.click()}>
+            <Upload size={30} strokeWidth={1.3} />
+            <span className="lk-drop-title">Drop your photo here, or click to browse</span>
+            <span className="lk-drop-sub">JPG, PNG, WEBP · any face angle</span>
+          </button>
+        )}
+        {mode === "camera" && !image && (
+          <div className="lk-camstage">
+            <video ref={videoRef} className="lk-video" muted playsInline />
+            {!streamOn && (
+              <button className="lk-dropzone lk-cam-overlay" onClick={startCamera}>
+                <Camera size={30} strokeWidth={1.3} />
+                <span className="lk-drop-title">Tap to open camera</span>
+                <span className="lk-drop-sub">Works on mobile and desktop</span>
+              </button>
+            )}
+            {streamOn && (
+              <button className="lk-shutter" onClick={snapPhoto} aria-label="Take photo" />
+            )}
+          </div>
+        )}
+        {image && (
+          <div className="lk-preview">
+            <img src={image.dataUrl} alt="Captured face" />
+            <button className="lk-retake" onClick={() => { setImage(null); setError(""); }}>
+              <RotateCcw size={14} /> Retake
+            </button>
+          </div>
+        )}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          className="lk-hidden-input"
+          onChange={handleFile}
+        />
+      </div>
+
+      {error && (
+        <div className="lk-alert">
+          <AlertCircle size={15} /> {error}
+        </div>
+      )}
+
+      <div className="lk-actions">
+        <button className="lk-btn lk-btn-ghost" onClick={onBack}>Back</button>
+        <button
+          className="lk-btn lk-btn-primary"
+          disabled={!image}
+          onClick={() => image && onAnalyze(image)}
+        >
+          <Sparkles size={16} /> Analyze My Face
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Analyzing() {
+  return (
+    <div className="lk-card lk-center">
+      <Stepper step="analyzing" />
+      <div className="lk-analyzing">
+        <ScanFace size={48} strokeWidth={1.2} />
+        <div className="lk-scan-line lk-scan-line-abs" />
+      </div>
+      <h2 className="lk-h2">Reading your face shape…</h2>
+      <p className="lk-p">Our AI is checking the photo and matching hairstyles to your features.</p>
+    </div>
+  );
+}
+
+function ResultCard({ name, reason, suited, image, loading, error, onRetry }) {
+  return (
+    <div className="lk-result-card">
+      <div className="lk-result-img">
+        {loading && <Loader2 className="lk-spin" size={22} />}
+        {!loading && image && <img src={image} alt={name} />}
+        {!loading && !image && (
+          <div className="lk-result-fallback">
+            <Wand2 size={20} strokeWidth={1.3} />
+            {error ? (
+              <button className="lk-retry" onClick={onRetry}>Retry</button>
+            ) : (
+              <span>Queued</span>
+            )}
+          </div>
+        )}
+      </div>
+      <div className="lk-result-body">
+        <div className="lk-result-head">
+          <h4>{name}</h4>
+          {typeof suited === "boolean" && (
+            <span className={"lk-pill" + (suited ? " lk-pill-good" : " lk-pill-bad")}>
+              {suited ? <Check size={11} /> : <X size={11} />}
+              {suited ? "Suits you" : "Bold pick"}
+            </span>
+          )}
+        </div>
+        {reason && <p className="lk-result-reason">{reason}</p>}
+      </div>
+    </div>
+  );
+}
+
+function Hub({ gender, image, geminiKey, onNext, onThanks }) {
+  const [subTab, setSubTab] = useState("nine");
+  const [analysis, setAnalysis] = useState(null); // {faceShape, notes, styles:[{name,reason,suited}]}
+  const [analysisError, setAnalysisError] = useState("");
+  const [gens, setGens] = useState({}); // name -> {loading, image, error}
+  const [customQuery, setCustomQuery] = useState("");
+  const [customBusy, setCustomBusy] = useState(false);
+  const [customResult, setCustomResult] = useState(null); // {suited, reason, image, error}
+  const startedRef = useRef(false);
+
+  const catalog = gender === "women" ? WOMEN_CATALOG : MEN_CATALOG;
+
+  const runAnalysis = useCallback(async () => {
+    setAnalysisError("");
+    setAnalysis(null);
+    try {
+      const prompt =
+        "You are a professional hairstylist AI. Look at this photo and respond ONLY with JSON, no prose, no code fences.\n" +
+        "First confirm this is a real photo of a human face (isHuman: true/false).\n" +
+        "If it is a human face, determine the face shape (one of: oval, round, square, heart, long, diamond) and 1-2 short notable features (e.g. hairline, jaw).\n" +
+        "Then, from this exact list of haircuts: " + JSON.stringify(catalog) + "\n" +
+        "rank all 9 for this specific face, each with a one-sentence reason grounded in the actual face shape/features, and whether it 'suits' them (true/false) — at least 2 should be marked false (bold/less ideal picks) if genuinely less suited.\n" +
+        "Respond in this exact JSON shape:\n" +
+        '{"isHuman": true, "faceShape": "oval", "notes": "short phrase", "styles": [{"name": "exact catalog name", "reason": "short reason", "suited": true}]}';
+      const text = await callGeminiAnalyze(image.base64, image.mimeType, prompt, geminiKey);
+      const parsed = parseJsonLoose(text);
+      if (!parsed.isHuman) {
+        setAnalysisError("We couldn't detect a clear human face in this photo. Please retake it with your face centered and well lit.");
+        return;
+      }
+      setAnalysis(parsed);
+    } catch (e) {
+      setAnalysisError(e.message || "Face analysis failed. Please try again.");
+    }
+  }, [image, catalog, geminiKey]);
+
+  useEffect(() => {
+    if (!startedRef.current) {
+      startedRef.current = true;
+      runAnalysis();
+    }
+  }, [runAnalysis]);
+
+  useEffect(() => {
+    if (!analysis || !geminiKey) return;
+    let cancelled = false;
+    (async () => {
+      for (const s of analysis.styles) {
+        if (cancelled) return;
+        setGens((prev) => ({ ...prev, [s.name]: { loading: true } }));
+        try {
+          const prompt =
+            "Edit this photo so the person now has a " + s.name +
+            " haircut. Keep their face, identity, skin tone, and background exactly the same — only change the hair. Photorealistic result.";
+          const img = await callGeminiEdit(image.base64, image.mimeType, prompt, geminiKey);
+          if (!cancelled) setGens((prev) => ({ ...prev, [s.name]: { loading: false, image: img } }));
+        } catch (e) {
+          if (!cancelled) setGens((prev) => ({ ...prev, [s.name]: { loading: false, error: e.message } }));
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [analysis, geminiKey, image]);
+
+  function retryOne(name) {
+    if (!geminiKey) return;
+    setGens((prev) => ({ ...prev, [name]: { loading: true } }));
+    const prompt =
+      "Edit this photo so the person now has a " + name +
+      " haircut. Keep their face, identity, skin tone, and background exactly the same — only change the hair. Photorealistic result.";
+    callGeminiEdit(image.base64, image.mimeType, prompt, geminiKey)
+      .then((img) => setGens((prev) => ({ ...prev, [name]: { loading: false, image: img } })))
+      .catch((e) => setGens((prev) => ({ ...prev, [name]: { loading: false, error: e.message } })));
+  }
+
+  async function runCustom() {
+    if (!customQuery.trim()) return;
+    setCustomBusy(true);
+    setCustomResult(null);
+    try {
+      const prompt =
+        "You are a professional hairstylist AI. A client wants to know if the haircut \"" + customQuery.trim() +
+        "\" would suit them, based on this photo. Respond ONLY with JSON: " +
+        '{"suited": true, "reason": "2-3 sentence honest explanation referencing their actual face shape/features"}';
+      const text = await callGeminiAnalyze(image.base64, image.mimeType, prompt, geminiKey);
+      const parsed = parseJsonLoose(text);
+      let genImage = null;
+      let genError = null;
+      if (geminiKey) {
+        try {
+          genImage = await callGeminiEdit(
+            image.base64,
+            image.mimeType,
+            "Edit this photo so the person now has a " + customQuery.trim() +
+              " haircut. Keep their face, identity, skin tone, and background exactly the same — only change the hair. Photorealistic result.",
+            geminiKey
+          );
+        } catch (e) {
+          genError = e.message;
+        }
+      }
+      setCustomResult({ suited: parsed.suited, reason: parsed.reason, image: genImage, error: genError });
+    } catch (e) {
+      setCustomResult({ error: e.message || "Couldn't evaluate that style. Try again." });
+    } finally {
+      setCustomBusy(false);
+    }
+  }
+
+  if (analysisError) {
+    return (
+      <div className="lk-card lk-center">
+        <div className="lk-alert lk-alert-lg">
+          <AlertCircle size={18} /> {analysisError}
+        </div>
+        <button className="lk-btn lk-btn-primary" onClick={runAnalysis}>Try again</button>
+      </div>
+    );
+  }
+
+  if (!analysis) {
+    return <Analyzing />;
+  }
+
+  return (
+    <div className="lk-card">
+      <Stepper step="hub" />
+      <div className="lk-hub-head">
+        <div>
+          <h2 className="lk-h2">Here's what we see</h2>
+          <p className="lk-p">
+            Face shape: <strong>{analysis.faceShape}</strong>
+            {analysis.notes ? " — " + analysis.notes : ""}
+          </p>
+        </div>
+        <img className="lk-hub-thumb" src={image.dataUrl} alt="You" />
+      </div>
+
+      <div className="lk-tabs">
+        <button className={"lk-tab" + (subTab === "nine" ? " is-active" : "")} onClick={() => setSubTab("nine")}>
+          9 Suggested Styles
+        </button>
+        <button className={"lk-tab" + (subTab === "custom" ? " is-active" : "")} onClick={() => setSubTab("custom")}>
+          Try a Specific Style
+        </button>
+      </div>
+
+      {subTab === "nine" && (
+        <div className="lk-grid">
+          {analysis.styles.map((s) => {
+            const g = gens[s.name] || {};
+            return (
+              <ResultCard
+                key={s.name}
+                name={s.name}
+                reason={s.reason}
+                suited={s.suited}
+                image={g.image}
+                loading={!!g.loading}
+                error={g.error}
+                onRetry={() => retryOne(s.name)}
+              />
+            );
+          })}
+        </div>
+      )}
+
+      {subTab === "custom" && (
+        <div className="lk-custom">
+          <label className="lk-label">What hairstyle do you want to try?</label>
+          <div className="lk-custom-row">
+            <input
+              className="lk-input"
+              placeholder="e.g. Long Layered Wavy Cut"
+              value={customQuery}
+              onChange={(e) => setCustomQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && runCustom()}
+            />
+            <button className="lk-btn lk-btn-primary" disabled={customBusy || !customQuery.trim()} onClick={runCustom}>
+              {customBusy ? <Loader2 className="lk-spin" size={16} /> : <Wand2 size={16} />}
+              Generate
+            </button>
+          </div>
+
+          {customResult && (
+            <div className="lk-custom-result">
+              {customResult.error && !customResult.reason && (
+                <div className="lk-alert"><AlertCircle size={15} /> {customResult.error}</div>
+              )}
+              {customResult.reason && (
+                <div className="lk-custom-panel">
+                  <div className="lk-custom-img">
+                    {customResult.image ? (
+                      <img src={customResult.image} alt={customQuery} />
+                    ) : (
+                      <div className="lk-result-fallback">
+                        <Wand2 size={20} strokeWidth={1.3} />
+                        <span>{customResult.error ? "Preview unavailable" : "No preview"}</span>
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <span className={"lk-pill" + (customResult.suited ? " lk-pill-good" : " lk-pill-bad")}>
+                      {customResult.suited ? <Check size={11} /> : <X size={11} />}
+                      {customResult.suited ? "Suitable for you" : "Not the best match"}
+                    </span>
+                    <p className="lk-result-reason lk-mt">{customResult.reason}</p>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="lk-actions">
+        <button className="lk-btn lk-btn-ghost" onClick={onNext}>Next</button>
+        <button className="lk-btn lk-btn-primary" onClick={onThanks}>
+          <ThumbsUp size={16} /> Thanks, I'm Done
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ThankYou({ onRate, onHome }) {
+  return (
+    <div className="lk-card lk-center">
+      <Stepper step="thanks" />
+      <div className="lk-thanks-icon"><Check size={30} strokeWidth={1.5} /></div>
+      <h2 className="lk-h2">Thank you</h2>
+      <p className="lk-p">We hope you found the perfect look. Let your stylist know which one you chose.</p>
+      <div className="lk-actions lk-actions-center">
+        <button className="lk-btn lk-btn-ghost" onClick={onHome}><Home size={15} /> Start Over</button>
+        <button className="lk-btn lk-btn-primary" onClick={onRate}><Star size={15} /> Leave a Rating</button>
+      </div>
+    </div>
+  );
+}
+
+function Ratings({ onBack }) {
+  const [ratings, setRatings] = useState(null);
+  const [stars, setStars] = useState(0);
+  const [hoverStars, setHoverStars] = useState(0);
+  const [comment, setComment] = useState("");
+  const [name, setName] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [loadError, setLoadError] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const res = await window.storage.list("rating:", true);
+      const keys = (res && res.keys) || [];
+      const items = [];
+      for (const k of keys) {
+        try {
+          const r = await window.storage.get(k, true);
+          if (r && r.value) items.push(JSON.parse(r.value));
+        } catch (e) { /* skip unreadable entry */ }
+      }
+      items.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+      setRatings(items);
+    } catch (e) {
+      setRatings([]);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  async function submit() {
+    if (!stars) return;
+    setSubmitting(true);
+    setLoadError("");
+    try {
+      const entry = { stars, comment: comment.trim(), name: name.trim() || "Guest", ts: Date.now() };
+      const key = "rating:" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+      const result = await window.storage.set(key, JSON.stringify(entry), true);
+      if (!result) throw new Error("Storage did not confirm the save.");
+      setStars(0);
+      setComment("");
+      setName("");
+      await load();
+    } catch (e) {
+      setLoadError("Couldn't save your rating. Please try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const avg =
+    ratings && ratings.length ? (ratings.reduce((a, r) => a + r.stars, 0) / ratings.length).toFixed(1) : null;
+
+  return (
+    <div className="lk-card">
+      <div className="lk-ratings-head">
+        <div>
+          <h2 className="lk-h2">Ratings</h2>
+          <p className="lk-p">Stored in this browser (see note below on making ratings truly public).</p>
+        </div>
+        {avg && (
+          <div className="lk-avg">
+            <Star size={16} className="lk-star-fill" />
+            <span>{avg}</span>
+            <small>({ratings.length})</small>
+          </div>
+        )}
+      </div>
+
+      <div className="lk-rate-form">
+        <label className="lk-label">Your rating</label>
+        <div className="lk-starrow">
+          {[1, 2, 3, 4, 5].map((n) => (
+            <button
+              key={n}
+              className="lk-starbtn"
+              onMouseEnter={() => setHoverStars(n)}
+              onMouseLeave={() => setHoverStars(0)}
+              onClick={() => setStars(n)}
+              aria-label={n + " stars"}
+            >
+              <Star size={22} className={(hoverStars || stars) >= n ? "lk-star-fill" : "lk-star-empty"} />
+            </button>
+          ))}
+        </div>
+        <label className="lk-label">Name (optional)</label>
+        <input className="lk-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" />
+        <label className="lk-label">Comment (optional)</label>
+        <textarea
+          className="lk-input lk-textarea"
+          value={comment}
+          onChange={(e) => setComment(e.target.value)}
+          placeholder="How was your Lookora experience?"
+        />
+        {loadError && <div className="lk-alert"><AlertCircle size={15} /> {loadError}</div>}
+        <div className="lk-actions">
+          <button className="lk-btn lk-btn-ghost" onClick={onBack}>Back</button>
+          <button className="lk-btn lk-btn-primary" disabled={!stars || submitting} onClick={submit}>
+            {submitting ? <Loader2 className="lk-spin" size={16} /> : <Star size={16} />}
+            Submit Rating
+          </button>
+        </div>
+      </div>
+
+      <div className="lk-rate-list">
+        {ratings === null && <p className="lk-p">Loading ratings…</p>}
+        {ratings !== null && ratings.length === 0 && (
+          <div className="lk-empty">
+            <Star size={22} strokeWidth={1.2} />
+            <p>No ratings yet. Be the first to share your experience.</p>
+          </div>
+        )}
+        {ratings && ratings.map((r, i) => (
+          <div className="lk-rate-item" key={i}>
+            <div className="lk-rate-item-head">
+              <div className="lk-rate-stars">
+                {[1, 2, 3, 4, 5].map((n) => (
+                  <Star key={n} size={13} className={n <= r.stars ? "lk-star-fill" : "lk-star-empty"} />
+                ))}
+              </div>
+              <span className="lk-rate-name">{r.name}</span>
+            </div>
+            {r.comment && <p className="lk-rate-comment">{r.comment}</p>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SettingsPanel({ geminiKey, onSave, onBack }) {
+  const [gValue, setGValue] = useState(geminiKey || "");
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState("");
+
+  async function save() {
+    setErr("");
+    try {
+      await window.storage.set("gemini-api-key", gValue.trim(), false);
+      onSave(gValue.trim());
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (e) {
+      setErr("Couldn't save the key locally. You can still use it for this session.");
+      onSave(gValue.trim());
+    }
+  }
+
+  return (
+    <div className="lk-card">
+      <h2 className="lk-h2">Settings</h2>
+      <p className="lk-p">
+        This key is stored only in this browser (localStorage) and is sent directly from your
+        browser to Google — never to any server of ours. Because of that, anyone who opens
+        this page's dev tools can see the key, so use one with a low spend limit, or read the note
+        at the bottom of the HTML file about adding a small backend proxy for production use.
+      </p>
+
+      <label className="lk-label">Gemini API Key — for face analysis and photo generation</label>
+      <input
+        className="lk-input"
+        type="password"
+        placeholder="AIza..."
+        value={gValue}
+        onChange={(e) => setGValue(e.target.value)}
+      />
+      <p className="lk-p" style={{ marginTop: 6 }}>
+        Get one at <span className="lk-inline-link">aistudio.google.com/apikey</span>
+      </p>
+
+      {err && <div className="lk-alert"><AlertCircle size={15} /> {err}</div>}
+      <div className="lk-actions">
+        <button className="lk-btn lk-btn-ghost" onClick={onBack}>Back</button>
+        <button className="lk-btn lk-btn-primary" onClick={save}>
+          {saved ? <Check size={16} /> : null} {saved ? "Saved" : "Save Key"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Root ---------------- */
+
+function LookoraApp() {
+  const [screen, setScreen] = useState("landing"); // landing, gender, capture, hub, thanks, ratings, settings
+  const [prevScreen, setPrevScreen] = useState("landing");
+  const [gender, setGender] = useState(null);
+  const [image, setImage] = useState(null);
+  const [geminiKey, setGeminiKey] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r2 = await window.storage.get("gemini-api-key", false);
+        if (r2 && r2.value) setGeminiKey(r2.value);
+      } catch (e) { /* no key saved yet */ }
+    })();
+  }, []);
+
+  function go(next) {
+    setPrevScreen(screen);
+    setScreen(next);
+  }
+
+  function reset() {
+    setGender(null);
+    setImage(null);
+    setScreen("landing");
+  }
+
+  return (
+    <div className="lk-app">
+      <style>{CSS}</style>
+      <TopBar
+        onHome={reset}
+        onSettings={() => go("settings")}
+        onRatings={() => go("ratings")}
+        active={screen}
+      />
+      <div className="lk-stage">
+        {screen === "landing" && <Landing onBegin={() => go("gender")} />}
+        {screen === "gender" && (
+          <GenderSelect onPick={(g) => { setGender(g); go("capture"); }} />
+        )}
+        {screen === "capture" && (
+          <Capture
+            gender={gender}
+            onBack={() => go("gender")}
+            onAnalyze={(img) => { setImage(img); go("hub"); }}
+          />
+        )}
+        {screen === "hub" && image && (
+          <Hub
+            gender={gender}
+            image={image}
+            geminiKey={geminiKey}
+            onNext={() => go("thanks")}
+            onThanks={() => go("thanks")}
+          />
+        )}
+        {screen === "thanks" && (
+          <ThankYou onRate={() => go("ratings")} onHome={reset} />
+        )}
+        {screen === "ratings" && <Ratings onBack={() => go(prevScreen === "ratings" ? "landing" : prevScreen)} />}
+        {screen === "settings" && (
+          <SettingsPanel
+            geminiKey={geminiKey}
+            onSave={(g) => setGeminiKey(g)}
+            onBack={() => go(prevScreen === "settings" ? "landing" : prevScreen)}
+          />
+        )}
+      </div>
+      <div className="lk-footer">Lookora · AI Hair Studio</div>
+    </div>
+  );
+}
+
+/* ---------------- Styles ---------------- */
+
+const CSS = `
+
+.lk-app {
+  --bg: #14100c;
+  --panel: #1d1610;
+  --panel-2: #241b12;
+  --line: #3a2e1e;
+  --gold: #c8a565;
+  --gold-light: #e6cd97;
+  --cream: #f1e9d8;
+  --muted: #a4937a;
+  --good: #8aa07e;
+  --bad: #bf7461;
+  min-height: 100vh;
+  background:
+    radial-gradient(1200px 600px at 15% -10%, #241c12 0%, transparent 60%),
+    linear-gradient(180deg, var(--bg), #0f0c09 100%);
+  color: var(--cream);
+  font-family: 'Inter', sans-serif;
+  display: flex;
+  flex-direction: column;
+  padding: 0 20px 40px;
+}
+
+.lk-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 22px 4px 18px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 34px;
+}
+.lk-wordmark { display: flex; align-items: baseline; gap: 2px; background: none; border: none; cursor: pointer; color: var(--cream); }
+.lk-mark { font-family: 'Cormorant Garamond', serif; font-style: italic; font-size: 26px; color: var(--gold-light); }
+.lk-word { font-family: 'JetBrains Mono', monospace; font-size: 15px; letter-spacing: 0.28em; color: var(--cream); }
+.lk-topnav { display: flex; gap: 6px; }
+.lk-navbtn {
+  display: flex; align-items: center; gap: 6px;
+  background: transparent; border: 1px solid transparent; color: var(--muted);
+  font-family: 'Inter', sans-serif; font-size: 12.5px; letter-spacing: 0.04em;
+  padding: 8px 12px; border-radius: 8px; cursor: pointer; transition: all .15s ease;
+}
+.lk-navbtn:hover { color: var(--cream); border-color: var(--line); }
+.lk-navbtn.is-active { color: var(--gold-light); border-color: var(--gold); background: rgba(200,165,101,0.08); }
+
+.lk-stage { flex: 1; max-width: 1080px; width: 100%; margin: 0 auto; }
+
+.lk-landing { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 40px; align-items: center; min-height: 62vh; }
+.lk-landing-copy { max-width: 520px; }
+.lk-eyebrow { font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 0.14em; color: var(--gold); text-transform: uppercase; }
+.lk-h1 { font-family: 'Cormorant Garamond', serif; font-weight: 500; font-size: 58px; line-height: 1.04; margin: 18px 0 22px; }
+.lk-h1 em { font-style: italic; color: var(--gold-light); }
+.lk-sub { color: var(--muted); font-size: 15.5px; line-height: 1.65; margin-bottom: 30px; max-width: 460px; }
+.lk-landing-visual { display: flex; align-items: center; justify-content: center; }
+.lk-scan-frame {
+  position: relative; width: 220px; height: 220px; border: 1px solid var(--line);
+  border-radius: 50%; display: flex; align-items: center; justify-content: center;
+  color: var(--gold); background: radial-gradient(circle at 50% 40%, rgba(200,165,101,0.08), transparent 70%);
+  overflow: hidden;
+}
+.lk-scan-line {
+  position: absolute; left: 6%; right: 6%; height: 2px;
+  background: linear-gradient(90deg, transparent, var(--gold-light), transparent);
+  animation: lkscan 2.4s ease-in-out infinite;
+}
+.lk-scan-line-abs { position: absolute; top: 50%; }
+@keyframes lkscan { 0% { top: 8%; opacity: .2; } 50% { top: 88%; opacity: 1; } 100% { top: 8%; opacity: .2; } }
+
+.lk-card {
+  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+  border: 1px solid var(--line); border-radius: 16px;
+  padding: 36px 38px 30px; box-shadow: 0 24px 60px rgba(0,0,0,0.35);
+}
+.lk-center { text-align: center; display: flex; flex-direction: column; align-items: center; }
+
+.lk-stepper { display: flex; align-items: center; gap: 10px; margin-bottom: 26px; justify-content: center; }
+.lk-step { display: flex; align-items: center; gap: 8px; }
+.lk-step-num { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); border: 1px solid var(--line); padding: 2px 7px; border-radius: 20px; }
+.lk-step-num.is-done { color: var(--gold-light); border-color: var(--gold); }
+.lk-step-label { font-size: 12px; color: var(--muted); letter-spacing: 0.04em; }
+.lk-step-label.is-active { color: var(--cream); }
+.lk-step-rule { width: 22px; height: 1px; background: var(--line); }
+
+.lk-h2 { font-family: 'Cormorant Garamond', serif; font-weight: 500; font-size: 32px; margin: 4px 0 8px; }
+.lk-p { color: var(--muted); font-size: 14.5px; line-height: 1.6; margin-bottom: 6px; }
+
+.lk-choice-row { display: flex; gap: 16px; margin-top: 24px; }
+.lk-choice {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--cream);
+  padding: 30px 46px; border-radius: 12px; cursor: pointer; font-size: 15px; transition: all .15s ease;
+}
+.lk-choice:hover { border-color: var(--gold); color: var(--gold-light); transform: translateY(-2px); }
+
+.lk-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 20px 0 22px; }
+.lk-tab {
+  background: transparent; border: none; color: var(--muted); padding: 10px 4px; margin-right: 22px;
+  font-size: 13.5px; cursor: pointer; border-bottom: 2px solid transparent; display: flex; align-items: center; gap: 6px;
+}
+.lk-tab.is-active { color: var(--gold-light); border-bottom-color: var(--gold); }
+
+.lk-capture-stage { display: flex; justify-content: center; }
+.lk-dropzone {
+  width: 100%; max-width: 520px; min-height: 220px; border: 1px dashed var(--line); border-radius: 12px;
+  background: rgba(255,255,255,0.015); display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; color: var(--muted); cursor: pointer; transition: border-color .15s ease;
+}
+.lk-dropzone:hover { border-color: var(--gold); }
+.lk-drop-title { color: var(--cream); font-size: 14.5px; }
+.lk-drop-sub { font-size: 12px; color: var(--muted); }
+.lk-hidden-input { display: none; }
+
+.lk-camstage { position: relative; width: 100%; max-width: 520px; min-height: 300px; border-radius: 12px; overflow: hidden; background: #000; }
+.lk-video { width: 100%; height: 300px; object-fit: cover; transform: scaleX(-1); }
+.lk-cam-overlay { position: absolute; inset: 0; border-radius: 12px; }
+.lk-shutter {
+  position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+  width: 56px; height: 56px; border-radius: 50%; background: var(--gold); border: 4px solid rgba(255,255,255,0.35); cursor: pointer;
+}
+
+.lk-preview { position: relative; width: 100%; max-width: 320px; }
+.lk-preview img { width: 100%; border-radius: 12px; display: block; }
+.lk-retake {
+  position: absolute; bottom: 10px; right: 10px; background: rgba(20,16,12,0.85); border: 1px solid var(--line);
+  color: var(--cream); font-size: 12px; padding: 6px 10px; border-radius: 8px; display: flex; align-items: center; gap: 5px; cursor: pointer;
+}
+
+.lk-alert {
+  display: flex; align-items: flex-start; gap: 8px; background: rgba(191,116,97,0.1); border: 1px solid rgba(191,116,97,0.35);
+  color: #e2b7ab; padding: 10px 12px; border-radius: 10px; font-size: 13px; margin-top: 16px; text-align: left;
+}
+.lk-alert-lg { max-width: 460px; margin-bottom: 18px; }
+
+.lk-actions { display: flex; justify-content: space-between; margin-top: 28px; }
+.lk-actions-center { justify-content: center; gap: 14px; }
+
+.lk-btn {
+  display: inline-flex; align-items: center; gap: 8px; font-family: 'Inter', sans-serif; font-size: 13.5px;
+  border-radius: 9px; padding: 11px 20px; cursor: pointer; border: 1px solid transparent; transition: all .15s ease;
+}
+.lk-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.lk-btn-primary { background: linear-gradient(180deg, var(--gold-light), var(--gold)); color: #241b0f; font-weight: 600; }
+.lk-btn-primary:hover:not(:disabled) { filter: brightness(1.06); }
+.lk-btn-ghost { background: transparent; border-color: var(--line); color: var(--muted); }
+.lk-btn-ghost:hover { color: var(--cream); border-color: var(--gold); }
+.lk-btn-lg { padding: 14px 26px; font-size: 14.5px; }
+
+.lk-analyzing { position: relative; width: 90px; height: 90px; border: 1px solid var(--line); border-radius: 50%; display: flex; align-items: center; justify-content: center; color: var(--gold); overflow: hidden; margin-bottom: 8px; }
+
+.lk-hub-head { display: flex; justify-content: space-between; align-items: center; gap: 20px; }
+.lk-hub-thumb { width: 60px; height: 60px; border-radius: 10px; object-fit: cover; border: 1px solid var(--line); }
+
+.lk-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.lk-result-card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.lk-result-img { aspect-ratio: 1; background: #0f0c09; display: flex; align-items: center; justify-content: center; color: var(--muted); }
+.lk-result-img img { width: 100%; height: 100%; object-fit: cover; }
+.lk-result-fallback { display: flex; flex-direction: column; align-items: center; gap: 8px; font-size: 11.5px; }
+.lk-retry { background: transparent; border: 1px solid var(--line); color: var(--gold-light); font-size: 11px; padding: 4px 10px; border-radius: 6px; cursor: pointer; }
+.lk-result-body { padding: 12px 13px 14px; }
+.lk-result-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+.lk-result-head h4 { font-size: 13.5px; font-weight: 600; margin: 0; }
+.lk-result-reason { font-size: 12px; color: var(--muted); margin-top: 6px; line-height: 1.5; }
+.lk-mt { margin-top: 10px; }
+
+.lk-pill { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; padding: 3px 8px; border-radius: 20px; white-space: nowrap; }
+.lk-pill-good { background: rgba(138,160,126,0.15); color: var(--good); }
+.lk-pill-bad { background: rgba(191,116,97,0.15); color: var(--bad); }
+
+.lk-custom { max-width: 620px; }
+.lk-label { display: block; font-size: 12px; color: var(--muted); margin: 14px 0 6px; }
+.lk-custom-row { display: flex; gap: 10px; }
+.lk-input {
+  flex: 1; background: var(--panel-2); border: 1px solid var(--line); color: var(--cream);
+  padding: 11px 13px; border-radius: 9px; font-size: 13.5px; font-family: 'Inter', sans-serif;
+}
+.lk-input:focus { outline: none; border-color: var(--gold); }
+.lk-textarea { width: 100%; min-height: 80px; resize: vertical; font-family: 'Inter', sans-serif; }
+.lk-custom-result { margin-top: 20px; }
+.lk-custom-panel { display: grid; grid-template-columns: 160px 1fr; gap: 18px; align-items: start; }
+.lk-custom-img { width: 160px; height: 160px; border-radius: 12px; overflow: hidden; background: var(--panel-2); border: 1px solid var(--line); display: flex; align-items: center; justify-content: center; }
+.lk-custom-img img { width: 100%; height: 100%; object-fit: cover; }
+
+.lk-thanks-icon { width: 60px; height: 60px; border-radius: 50%; border: 1px solid var(--gold); color: var(--gold-light); display: flex; align-items: center; justify-content: center; margin-bottom: 4px; }
+
+.lk-ratings-head { display: flex; justify-content: space-between; align-items: flex-start; }
+.lk-avg { display: flex; align-items: center; gap: 5px; font-family: 'JetBrains Mono', monospace; color: var(--gold-light); }
+.lk-avg small { color: var(--muted); }
+.lk-rate-form { border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; margin: 20px 0 28px; background: rgba(255,255,255,0.012); }
+.lk-starrow { display: flex; gap: 4px; }
+.lk-starbtn { background: none; border: none; cursor: pointer; padding: 2px; }
+.lk-star-fill { fill: var(--gold); stroke: var(--gold); }
+.lk-star-empty { fill: none; stroke: var(--line); }
+.lk-rate-list { display: flex; flex-direction: column; gap: 12px; }
+.lk-empty { text-align: center; color: var(--muted); padding: 30px 0; display: flex; flex-direction: column; align-items: center; gap: 8px; font-size: 13.5px; }
+.lk-rate-item { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; background: var(--panel-2); }
+.lk-rate-item-head { display: flex; align-items: center; gap: 10px; }
+.lk-rate-stars { display: flex; gap: 1px; }
+.lk-rate-name { font-size: 12px; color: var(--muted); }
+.lk-rate-comment { font-size: 13px; color: var(--cream); margin-top: 6px; line-height: 1.5; }
+
+.lk-inline-link { color: var(--gold-light); font-family: 'JetBrains Mono', monospace; font-size: 12.5px; }
+
+.lk-spin { animation: lkspin 0.9s linear infinite; }
+@keyframes lkspin { to { transform: rotate(360deg); } }
+
+.lk-footer { text-align: center; color: var(--muted); font-size: 11px; letter-spacing: 0.08em; margin-top: 36px; font-family: 'JetBrains Mono', monospace; }
+
+@media (max-width: 820px) {
+  .lk-landing { grid-template-columns: 1fr; }
+  .lk-landing-visual { order: -1; }
+  .lk-h1 { font-size: 42px; }
+  .lk-grid { grid-template-columns: repeat(2, 1fr); }
+  .lk-custom-panel { grid-template-columns: 1fr; }
+  .lk-card { padding: 26px 20px 24px; }
+}
+`;
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<LookoraApp />);
+
+</script>
+</body>
+</html>
